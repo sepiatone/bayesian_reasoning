@@ -275,7 +275,7 @@ class TestPlotUtilities(unittest.TestCase):
             self.fail(f"plot_line_chart raised an exception: {e}")
 
 
-class TestJsonData(unittest.TestCase):
+class TestData(unittest.TestCase):
     def test_json_data(self):
         try:
             with open('data/schema.json', 'r') as f_schema:
@@ -285,21 +285,19 @@ class TestJsonData(unittest.TestCase):
                     with open('data/data.json', 'r') as f_data:
                         data = json.load(f_data)
                 except IOError:
-                    print("could not read file:", f_data)
+                    self.fail(f"could not read file: {f_data}")
 
-                for i in data["bayesian_reasoning"]: print(i["class_type"])
+                # for i in data["bayesian_reasoning"]: print(i["class_type"])
 
                 try:
                     validate(instance = data, schema = schema)
-                except ValidationError as ex_v:
-                    print("validation error: ", ex_v)
-                except SchemaError as ex_s:
-                    print("schema error: ", ex_s)
-                else:
-                    print("valid json data")
+                except ValidationError as e_v:
+                    self.fail(f"validation error: {e_v}")
+                except SchemaError as e_s:
+                    self.fail(f"schema error: {e_s}")
 
         except IOError:
-            print("could not read file:", f_schema)
+            self.fail(f"could not read file: {f_schema}")
 
 
 if __name__ == '__main__':
