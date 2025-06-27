@@ -5,7 +5,7 @@ import numpy as np
 from itertools import combinations
 
 # Load and merge logprobs data
-logprob_data_paths = ["data/logprobs_part1.csv", "data/logprobs_part2.csv"]
+logprob_data_paths = ["data/logprobs.csv"]
 logprobs = [pd.read_csv(logprob_data_path) for logprob_data_path in logprob_data_paths]
 logprobs = pd.concat(logprobs)
 logprobs.reset_index(drop=True, inplace=True)
