@@ -204,8 +204,8 @@ class Analyzer:
     
     def calculate_metric(
         self,
-        metric_name: str,
         metric_func: Callable,
+        metric_name: str | None = None,
         metric_col: str | None = None,
         group_by_cols: list[str] | None = None, 
         inherit_identical_values: bool = False,
@@ -214,11 +214,13 @@ class Analyzer:
         """Calculate metrics on the dataframe.
         
         Args:
-            metric_name: Name for the calculated metric column
-            metric_func: Function to calculate the metric. If group_by_cols and metric_col
-                         are provided, this function operates on the specified column Series
-                         within each group. Otherwise, it operates on the entire group DataFrame
-                         (if group_by_cols is provided) or the entire row (if group_by_cols is None).
+            metric_func: Function to calculate the metric. Can return a single value, a list
+                         (which will be exploded into new rows), or a dictionary/pd.Series
+                         (which will be expanded into new columns).
+            metric_name: Name for the new metric column(s).
+                         - If metric_func returns a single value, this is the column name.
+                         - If metric_func returns multiple values (e.g., a dict or pd.Series),
+                           this is optional and the names from the returned object are used.
             metric_col: Optional column name to apply the metric_func to directly within groups.
                         Ignored if group_by_cols is None.
             group_by_cols: Columns to group by (None for row-wise calculation)
@@ -232,67 +234,100 @@ class Analyzer:
             print("Warning: DataFrame is empty. Cannot calculate metrics.")
             return Analyzer(pd.DataFrame())
         
-        result_df = self.df.copy()
+        original_df = self.df.copy()
         
-        # Row-wise calculation (no grouping) - metric_col is ignored here
+        # Row-wise calculation (no grouping)
         if group_by_cols is None:
             try:
-                result_df[metric_name] = result_df.apply(
+                result = original_df.apply(
                     lambda row: metric_func(row, **metric_kwargs), axis=1
                 )
+                
+                # Check if the result should be expanded into multiple columns
+                if isinstance(result.iloc[0] if not result.empty else None, (dict, pd.Series)):
+                    if metric_name:
+                        print(f"Warning: metric_name '{metric_name}' is ignored when metric_func returns multiple values.")
+                    multi_metrics = result.apply(pd.Series)
+                    result_df = pd.concat([original_df, multi_metrics], axis=1)
+                    
+                # Check if the result is a list to be exploded into rows
+                elif isinstance(result.iloc[0] if not result.empty else None, (list, np.ndarray)):
+                    if not metric_name:
+                        raise ValueError("metric_name must be provided for list-returning metric functions.")
+                    original_df[metric_name] = result
+                    result_df = original_df.explode(metric_name)
+                    
+                # Standard case: one metric per row
+                else:
+                    if not metric_name:
+                        raise ValueError("metric_name must be provided for single-value metric functions.")
+                    original_df[metric_name] = result
+                    result_df = original_df
+                
                 return Analyzer(result_df)
+                
             except Exception as e:
                 print(f"Error in row-wise calculation: {e}")
                 return Analyzer(pd.DataFrame())
-        
+
         # Grouped calculation
         try:
             # Validate grouping columns
-            missing_cols = [col for col in group_by_cols if col not in result_df.columns]
+            missing_cols = [col for col in group_by_cols if col not in original_df.columns]
             if missing_cols:
                 print(f"Error: Missing grouping columns: {missing_cols}")
                 return Analyzer(pd.DataFrame())
             
             # Perform grouping and apply metric function
-            grouped = result_df.groupby(group_by_cols, observed=True)
+            grouped = original_df.groupby(group_by_cols, observed=True)
             
             # Apply metric function based on whether metric_col is specified
             if metric_col:
-                if metric_col not in result_df.columns:
+                if metric_col not in original_df.columns:
                     print(f"Error: Metric column '{metric_col}' not found.")
                     return Analyzer(pd.DataFrame())
-                # Apply function to the specified column within each group
-                result = grouped[metric_col].agg(metric_func, **metric_kwargs)
+                # Use apply on the column for flexibility (can return Series)
+                result = grouped[metric_col].apply(metric_func, **metric_kwargs)
             else:
                 # Apply function to the entire group DataFrame
                 result = grouped.apply(lambda g: metric_func(g, **metric_kwargs))
-            
-            # Handle list-returning metrics
-            if isinstance(result.iloc[0] if not result.empty else None, (list, np.ndarray)):
-                result = result.explode()
-                result = pd.to_numeric(result, errors="coerce")
-            
-            # Create result dataframe with the calculated metric
-            result.name = metric_name
-            result_df = result.reset_index()
+
+            # Handle multi-metric returns (result is a DataFrame)
+            if isinstance(result, pd.DataFrame):
+                if metric_name:
+                    print(f"Warning: metric_name '{metric_name}' is ignored when metric_func returns multiple values.")
+                result_df = result.reset_index()
+            # Handle single metric or list returns (result is a Series)
+            else:
+                if isinstance(result.iloc[0] if not result.empty else None, (list, np.ndarray)):
+                    if not metric_name:
+                        raise ValueError("metric_name must be provided for list-returning metric functions.")
+                    result = result.explode()
+                    result = pd.to_numeric(result, errors="coerce")
+                
+                if not metric_name:
+                    raise ValueError("metric_name must be provided for single-value metric functions.")
+                
+                result.name = metric_name
+                result_df = result.reset_index()
             
             # Inherit columns with identical values within each group
-            if inherit_identical_values and not result.empty:
-                # For each non-groupby column, check if all values in each group are identical
-                cols_to_check = [c for c in self.df.columns if c not in group_by_cols]
+            if inherit_identical_values and not result_df.empty:
+                cols_to_check = [c for c in original_df.columns if c not in group_by_cols]
                 
-                # Use nunique to find columns that have only one unique value per group
-                nunique_df = grouped[cols_to_check].nunique()
-                
-                # Get columns that have only 1 unique value for all groups
-                identical_cols = [col for col in cols_to_check if (nunique_df[col] <= 1).all()]
-                
-                if identical_cols:
-                    # Get the first value for each identical column in each group
-                    identical_values = grouped[identical_cols].first().reset_index()
+                if cols_to_check:
+                    # Use nunique to find columns with one unique value per group
+                    nunique_df = grouped[cols_to_check].nunique()
                     
-                    # Merge with result_df to add these columns
-                    result_df = pd.merge(result_df, identical_values, on=group_by_cols)
+                    # Identify columns that are constant within all groups
+                    identical_cols = [col for col in cols_to_check if (nunique_df[col] <= 1).all()]
+                    
+                    if identical_cols:
+                        # Get the first value for each constant column in each group
+                        identical_values = grouped[identical_cols].first().reset_index()
+                        
+                        # Merge with result_df to add these columns
+                        result_df = pd.merge(result_df, identical_values, on=group_by_cols)
             
             return Analyzer(result_df)
             
